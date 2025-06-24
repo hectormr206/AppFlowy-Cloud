@@ -1,0 +1,18 @@
+# railway.toml (colocado en la raíz de tu repositorio)
+
+# --- Servicio 1: AppFlowy Cloud (Backend Principal) ---
+# Railway lo encontrará y permitirá seleccionarlo por su nombre.
+[[services]]
+name = "appflowy-cloud"
+# Especifica la ruta a su Dockerfile.
+dockerfilePath = "./Dockerfile"
+# El comando de inicio está en el Dockerfile, así que no se necesita aquí.
+
+
+# --- Servicio 2: Admin Frontend ---
+# Este es el segundo servicio, también seleccionable por nombre.
+[[services]]
+name = "admin-frontend"
+# Especifica la ruta a su Dockerfile.
+dockerfilePath = "./admin_frontend/Dockerfile"
+# El comando de inicio también está en su Dockerfile.
