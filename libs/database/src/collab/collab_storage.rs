@@ -1,10 +1,7 @@
 use app_error::AppError;
 use async_trait::async_trait;
 
-use database_entity::dto::{
-  AFAccessLevel, AFSnapshotMeta, AFSnapshotMetas, CollabParams, InsertSnapshotParams, QueryCollab,
-  QueryCollabResult, SnapshotData,
-};
+use database_entity::dto::{CollabParams, QueryCollab, QueryCollabResult};
 
 use appflowy_proto::TimestampedEncodedCollab;
 use collab_entity::CollabType;
@@ -17,50 +14,16 @@ pub const COLLAB_SNAPSHOT_LIMIT: i64 = 30;
 pub const SNAPSHOT_PER_HOUR: i64 = 6;
 pub type AppResult<T, E = AppError> = core::result::Result<T, E>;
 
-/// [CollabStorageAccessControl] is a trait that provides access control when accessing the storage
-/// of the Collab object.
-#[async_trait]
-pub trait CollabStorageAccessControl: Send + Sync + 'static {
-  /// Updates the cache of the access level of the user for given collab object.
-  async fn update_policy(
-    &self,
-    uid: &i64,
-    oid: &Uuid,
-    level: AFAccessLevel,
-  ) -> Result<(), AppError>;
-
-  /// Removes the access level of the user for given collab object.
-  async fn enforce_read_collab(
-    &self,
-    workspace_id: &Uuid,
-    uid: &i64,
-    oid: &Uuid,
-  ) -> Result<(), AppError>;
-
-  /// Enforce the user's permission to write to the collab object.
-  async fn enforce_write_collab(
-    &self,
-    workspace_id: &Uuid,
-    uid: &i64,
-    oid: &Uuid,
-  ) -> Result<(), AppError>;
-
-  /// Enforce the user's permission to write to the workspace.
-  async fn enforce_write_workspace(&self, uid: &i64, workspace_id: &Uuid) -> Result<(), AppError>;
-
-  /// Enforce the user's permission to delete the collab object.
-  async fn enforce_delete(
-    &self,
-    workspace_id: &Uuid,
-    uid: &i64,
-    oid: &Uuid,
-  ) -> Result<(), AppError>;
-}
-
 #[derive(Clone)]
 pub enum GetCollabOrigin {
   User { uid: i64 },
   Server,
+}
+
+impl From<i64> for GetCollabOrigin {
+  fn from(uid: i64) -> Self {
+    GetCollabOrigin::User { uid }
+  }
 }
 
 /// Represents a storage mechanism for collaborations.
@@ -68,7 +31,7 @@ pub enum GetCollabOrigin {
 /// This trait provides asynchronous methods for CRUD operations related to collaborations.
 /// Implementors of this trait should provide the actual storage logic, be it in-memory, file-based, database-backed, etc.
 #[async_trait]
-pub trait CollabStorage: Send + Sync + 'static {
+pub trait CollabStore: Send + Sync + 'static {
   async fn upsert_collab(
     &self,
     workspace_id: Uuid,
@@ -142,26 +105,6 @@ pub trait CollabStorage: Send + Sync + 'static {
   ///
   /// * `Result<()>` - Returns `Ok(())` if the collaboration was deleted successfully, `Err` otherwise.
   async fn delete_collab(&self, workspace_id: &Uuid, uid: &i64, object_id: &Uuid) -> AppResult<()>;
-
-  async fn should_create_snapshot(&self, workspace_id: &Uuid, oid: &Uuid)
-    -> Result<bool, AppError>;
-
-  async fn create_snapshot(&self, params: InsertSnapshotParams) -> AppResult<AFSnapshotMeta>;
-  async fn queue_snapshot(&self, params: InsertSnapshotParams) -> AppResult<()>;
-
-  async fn get_collab_snapshot(
-    &self,
-    workspace_id: Uuid,
-    object_id: Uuid,
-    snapshot_id: &i64,
-  ) -> AppResult<SnapshotData>;
-
-  /// Returns list of snapshots for given object_id in descending order of creation time.
-  async fn get_collab_snapshot_list(
-    &self,
-    workspace_id: &Uuid,
-    oid: &Uuid,
-  ) -> AppResult<AFSnapshotMetas>;
 
   fn mark_as_editing(&self, oid: Uuid);
 }

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use super::utils::{batch_get_latest_collab_encoded, get_latest_collab_encoded};
+use super::utils::batch_get_latest_collab_encoded;
 use app_error::AppError;
-use appflowy_collaborate::collab::storage::CollabAccessControlStorage;
 use async_trait::async_trait;
 use collab::lock::RwLock;
 use collab_database::database_trait::{DatabaseCollabReader, EncodeCollabByOid};
@@ -22,7 +21,7 @@ use collab_database::{
 };
 use collab_entity::{CollabType, EncodedCollab};
 use dashmap::DashMap;
-use database::collab::GetCollabOrigin;
+use database::collab::{CollabStore, GetCollabOrigin};
 use uuid::Uuid;
 use yrs::block::ClientID;
 
@@ -171,7 +170,7 @@ fn create_card_status_field() -> Field {
 #[derive(Clone)]
 pub struct PostgresDatabaseCollabService {
   pub workspace_id: Uuid,
-  pub collab_storage: Arc<CollabAccessControlStorage>,
+  pub collab_storage: Arc<dyn CollabStore>,
   pub client_id: ClientID,
   cache: Arc<DashMap<RowId, Arc<RwLock<DatabaseRow>>>>,
 }
@@ -179,7 +178,7 @@ pub struct PostgresDatabaseCollabService {
 impl PostgresDatabaseCollabService {
   pub fn new(
     workspace_id: Uuid,
-    collab_storage: Arc<CollabAccessControlStorage>,
+    collab_storage: Arc<dyn CollabStore>,
     client_id: ClientID,
   ) -> Self {
     Self {
@@ -188,17 +187,6 @@ impl PostgresDatabaseCollabService {
       client_id,
       cache: Arc::new(DashMap::new()),
     }
-  }
-  pub async fn get_latest_collab(&self, oid: Uuid, collab_type: CollabType) -> EncodedCollab {
-    get_latest_collab_encoded(
-      &self.collab_storage,
-      GetCollabOrigin::Server,
-      self.workspace_id,
-      oid,
-      collab_type,
-    )
-    .await
-    .unwrap()
   }
 }
 
@@ -214,7 +202,18 @@ impl DatabaseCollabReader for PostgresDatabaseCollabService {
     collab_type: CollabType,
   ) -> Result<EncodedCollab, DatabaseError> {
     let object_id = Uuid::parse_str(object_id)?;
-    let collab_data = self.get_latest_collab(object_id, collab_type).await;
+    let collab_data = self
+      .collab_storage
+      .get_full_encode_collab(
+        GetCollabOrigin::Server,
+        &self.workspace_id,
+        &object_id,
+        collab_type,
+      )
+      .await
+      .map(|v| v.encoded_collab)
+      .map_err(|err| DatabaseError::Internal(err.into()))?;
+
     Ok(collab_data)
   }
 

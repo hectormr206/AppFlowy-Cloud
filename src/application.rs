@@ -22,7 +22,6 @@ use actix_web::cookie::Key;
 use actix_web::middleware::NormalizePath;
 use actix_web::{dev::Server, web, web::Data, App, HttpResponse, HttpServer, Responder};
 use anyhow::{Context, Error};
-use appflowy_collaborate::collab::access_control::CollabStorageAccessControlImpl;
 use aws_sdk_s3::config::{Credentials, Region, SharedCredentialsProvider};
 use aws_sdk_s3::operation::create_bucket::CreateBucketError;
 use aws_sdk_s3::types::{
@@ -37,9 +36,8 @@ use tracing::{error, info};
 use appflowy_ai_client::client::AppFlowyAIClient;
 use appflowy_collaborate::actix_ws::server::RealtimeServerActor;
 use appflowy_collaborate::collab::cache::CollabCache;
-use appflowy_collaborate::collab::storage::CollabStorageImpl;
-use appflowy_collaborate::snapshot::SnapshotControl;
-use appflowy_collaborate::ws2::{CollabStore, WsServer};
+use appflowy_collaborate::collab::collab_store::CollabStoreImpl;
+use appflowy_collaborate::ws2::{CollabManager, WsServer};
 use appflowy_collaborate::CollaborationServer;
 use collab_stream::awareness_gossip::AwarenessGossip;
 use collab_stream::metrics::CollabStreamMetrics;
@@ -119,10 +117,10 @@ pub async fn run_actix_server(
       )
     })?;
 
-  let storage = state.collab_access_control_storage.clone();
+  let storage = state.collab_storage.clone();
 
   // Initialize metrics that which are registered in the registry.
-  let realtime_server = CollaborationServer::<_>::new(
+  let realtime_server = CollaborationServer::new(
     storage.clone(),
     state.realtime_access_control.clone(),
     state.metrics.realtime_metrics.clone(),
@@ -309,22 +307,10 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     config.collab.s3_collab_threshold as usize,
   );
 
-  let collab_storage_access_control = CollabStorageAccessControlImpl {
-    collab_access_control: collab_access_control.clone(),
-    workspace_access_control: workspace_access_control.clone(),
-    cache: collab_cache.clone(),
-  };
-  let snapshot_control = SnapshotControl::new(
-    pg_pool.clone(),
-    s3_client.clone(),
-    metrics.collab_metrics.clone(),
-  )
-  .await;
-
-  let collab_access_control_storage = Arc::new(CollabStorageImpl::new(
+  let collab_access_control_storage = Arc::new(CollabStoreImpl::new(
     collab_cache.clone(),
-    collab_storage_access_control.clone(),
-    snapshot_control,
+    collab_access_control.clone(),
+    workspace_access_control.clone(),
   ));
 
   let mailer = get_mailer(&config.mailer).await?;
@@ -352,16 +338,16 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     embedder_config,
     redis_conn_manager.clone(),
   );
-  let collab_store = CollabStore::new(
+  let manager = CollabManager::new(
     thread_pool.clone(),
-    collab_storage_access_control.clone(),
+    collab_access_control.clone(),
     collab_cache.clone(),
     redis_conn_manager.clone(),
     redis_stream_router.clone(),
     awareness_gossip.clone(),
     indexer_scheduler.clone(),
   );
-  let ws_server = WsServer::new(collab_store).start();
+  let ws_server = WsServer::new(manager).start();
 
   info!("Application state initialized");
   Ok(AppState {
@@ -374,7 +360,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     awareness_gossip,
     redis_connection_manager: redis_conn_manager,
     collab_cache,
-    collab_access_control_storage,
+    collab_storage: collab_access_control_storage,
     collab_access_control,
     workspace_access_control,
     realtime_access_control,

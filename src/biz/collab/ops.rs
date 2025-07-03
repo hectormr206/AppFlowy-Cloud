@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use app_error::AppError;
-use appflowy_collaborate::collab::storage::CollabAccessControlStorage;
 use chrono::DateTime;
 use chrono::Utc;
 use collab::preclude::Collab;
@@ -29,7 +28,7 @@ use collab_folder::{CollabOrigin, SpaceInfo};
 use collab_rt_entity::user::RealtimeUser;
 use database::collab::select_last_updated_database_row_ids;
 use database::collab::select_workspace_database_oid;
-use database::collab::{CollabStorage, GetCollabOrigin};
+use database::collab::{CollabStore, GetCollabOrigin};
 use database::publish::select_published_view_ids_for_workspace;
 use database::publish::select_published_view_ids_with_publish_info_for_workspace;
 use database::publish::select_workspace_id_for_publish_namespace;
@@ -63,7 +62,6 @@ use super::utils::field_by_id_name_uniq;
 use super::utils::get_latest_collab;
 use super::utils::get_latest_collab_database_body;
 use super::utils::get_latest_collab_database_row_body;
-use super::utils::get_latest_collab_folder;
 use super::utils::get_row_details_serde;
 use super::utils::type_option_reader_by_id;
 use super::utils::type_options_serde;
@@ -77,40 +75,33 @@ use crate::biz::collab::folder_view::check_if_view_is_space;
 use crate::biz::collab::utils::get_database_row_doc_changes;
 use crate::biz::workspace::page_view::update_workspace_folder_data;
 use crate::state::AppState;
-use actix::Addr;
-use appflowy_collaborate::ws2::{CollabUpdatePublisher, WsServer};
+use appflowy_collaborate::ws2::{CollabUpdatePublisher, WorkspaceCollabInstanceCache};
 use collab::core::collab::{default_client_id, CollabOptions};
 use shared_entity::dto::workspace_dto::{FolderView, PublishedView};
 use sqlx::types::Uuid;
 use std::collections::HashSet;
+use std::sync::Arc;
 use yrs::block::ClientID;
 
 pub async fn get_user_favorite_folder_views(
-  collab_storage: &CollabAccessControlStorage,
+  collab_instance_cache: &impl WorkspaceCollabInstanceCache,
   pg_pool: &PgPool,
   uid: i64,
   workspace_id: Uuid,
 ) -> Result<Vec<FavoriteFolderView>, AppError> {
-  let client_id = default_client_id();
-  let folder = get_latest_collab_folder(
-    collab_storage,
-    GetCollabOrigin::User { uid },
-    workspace_id,
-    client_id,
-  )
-  .await?;
+  let folder = collab_instance_cache.get_folder(workspace_id).await?;
   let publish_view_ids = select_published_view_ids_for_workspace(pg_pool, workspace_id).await?;
   let publish_view_ids: HashSet<String> = publish_view_ids
     .into_iter()
     .map(|id| id.to_string())
     .collect();
   let deleted_section_item_ids: Vec<String> = folder
-    .get_my_trash_sections()
+    .get_my_trash_sections(uid)
     .iter()
     .map(|s| s.id.clone())
     .collect();
   let favorite_section_items: Vec<SectionItem> = folder
-    .get_my_favorite_sections()
+    .get_my_favorite_sections(uid)
     .into_iter()
     .filter(|s| !deleted_section_item_ids.contains(&s.id))
     .collect();
@@ -118,30 +109,24 @@ pub async fn get_user_favorite_folder_views(
     &favorite_section_items,
     &folder,
     &publish_view_ids,
+    uid,
   ))
 }
 
 pub async fn get_user_recent_folder_views(
-  collab_storage: &CollabAccessControlStorage,
+  collab_instance_cache: &impl WorkspaceCollabInstanceCache,
   pg_pool: &PgPool,
   uid: i64,
   workspace_id: Uuid,
 ) -> Result<Vec<RecentFolderView>, AppError> {
-  let client_id = default_client_id();
-  let folder = get_latest_collab_folder(
-    collab_storage,
-    GetCollabOrigin::User { uid },
-    workspace_id,
-    client_id,
-  )
-  .await?;
+  let folder = collab_instance_cache.get_folder(workspace_id).await?;
   let deleted_section_item_ids: Vec<String> = folder
-    .get_my_trash_sections()
+    .get_my_trash_sections(uid)
     .iter()
     .map(|s| s.id.clone())
     .collect();
   let recent_section_items: Vec<SectionItem> = folder
-    .get_my_recent_sections()
+    .get_my_recent_sections(uid)
     .into_iter()
     .filter(|s| !deleted_section_item_ids.contains(&s.id))
     .collect();
@@ -154,24 +139,22 @@ pub async fn get_user_recent_folder_views(
     &recent_section_items,
     &folder,
     &publish_view_ids,
+    uid,
   ))
 }
 
 pub async fn get_user_trash_folder_views(
-  collab_storage: &CollabAccessControlStorage,
+  collab_instance_cache: &impl WorkspaceCollabInstanceCache,
   uid: i64,
   workspace_id: Uuid,
 ) -> Result<Vec<TrashFolderView>, AppError> {
-  let client_id = default_client_id();
-  let folder = get_latest_collab_folder(
-    collab_storage,
-    GetCollabOrigin::User { uid },
-    workspace_id,
-    client_id,
-  )
-  .await?;
-  let section_items = folder.get_my_trash_sections();
-  Ok(section_items_to_trash_folder_view(&section_items, &folder))
+  let folder = collab_instance_cache.get_folder(workspace_id).await?;
+  let section_items = folder.get_my_trash_sections(uid);
+  Ok(section_items_to_trash_folder_view(
+    &section_items,
+    &folder,
+    uid,
+  ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -199,16 +182,23 @@ fn patch_old_workspace_folder(
       .build()
       .view;
     let mut txn = folder.collab.transact_mut();
-    folder.body.views.insert(&mut txn, space_view, None);
+    folder
+      .body
+      .views
+      .insert(&mut txn, space_view, None, user.uid);
     for (i, current_view_id) in child_view_id_without_space.iter().enumerate() {
       let previous_view_id = if i == 0 {
         None
       } else {
         Some(child_view_id_without_space[i - 1].clone())
       };
-      folder
-        .body
-        .move_nested_view(&mut txn, current_view_id, &space_id, previous_view_id);
+      folder.body.move_nested_view(
+        &mut txn,
+        current_view_id,
+        &space_id,
+        previous_view_id,
+        user.uid,
+      );
     }
     txn.encode_update_v1()
   };
@@ -217,17 +207,19 @@ fn patch_old_workspace_folder(
 
 async fn fix_old_workspace_folder(
   appflowy_web_metrics: &AppFlowyWebMetrics,
-  collab_update_writer: &Addr<WsServer>,
+  update_publisher: &impl CollabUpdatePublisher,
   user: RealtimeUser,
   mut folder: Folder,
   workspace_id: Uuid,
 ) -> Result<Folder, AppError> {
-  let root_view = folder.get_view(&workspace_id.to_string()).ok_or_else(|| {
-    AppError::InvalidRequest(format!(
-      "Failed to get view for workspace_id: {}",
-      workspace_id
-    ))
-  })?;
+  let root_view = folder
+    .get_view(&workspace_id.to_string(), user.uid)
+    .ok_or_else(|| {
+      AppError::InvalidRequest(format!(
+        "Failed to get view for workspace_id: {}",
+        workspace_id
+      ))
+    })?;
   let direct_workspace_children: Vec<String> = root_view
     .children
     .iter()
@@ -235,7 +227,7 @@ async fn fix_old_workspace_folder(
     .collect();
   let has_at_least_one_space = direct_workspace_children
     .iter()
-    .filter_map(|view_id| folder.get_view(view_id))
+    .filter_map(|view_id| folder.get_view(view_id, user.uid))
     .any(|view| check_if_view_is_space(&view));
   if !has_at_least_one_space {
     let folder_update = patch_old_workspace_folder(
@@ -246,7 +238,7 @@ async fn fix_old_workspace_folder(
     )?;
     update_workspace_folder_data(
       appflowy_web_metrics,
-      collab_update_writer,
+      update_publisher,
       user,
       workspace_id,
       folder_update,
@@ -264,27 +256,19 @@ pub async fn get_user_workspace_structure(
   depth: u32,
   root_view_id: &Uuid,
 ) -> Result<FolderView, AppError> {
-  let collab_storage = &state.collab_access_control_storage;
   let appflowy_web_metrics = &state.metrics.appflowy_web_metrics;
   let depth_limit = 10;
-  let client_id = default_client_id();
   if depth > depth_limit {
     return Err(AppError::InvalidRequest(format!(
       "Depth {} is too large (limit: {})",
       depth, depth_limit
     )));
   }
-  let folder = get_latest_collab_folder(
-    collab_storage,
-    GetCollabOrigin::User { uid: user.uid },
-    workspace_id,
-    client_id,
-  )
-  .await?;
+  let folder = state.ws_server.get_folder(workspace_id).await?;
   let patched_folder = fix_old_workspace_folder(
     appflowy_web_metrics,
     &state.ws_server,
-    user,
+    user.clone(),
     folder,
     workspace_id,
   )
@@ -299,11 +283,12 @@ pub async fn get_user_workspace_structure(
     &patched_folder,
     depth,
     &publish_view_ids,
+    user.uid,
   )
 }
 
 pub async fn get_latest_workspace_database(
-  collab_storage: &CollabAccessControlStorage,
+  collab_storage: &Arc<dyn CollabStore>,
   pg_pool: &PgPool,
   collab_origin: GetCollabOrigin,
   workspace_id: Uuid,
@@ -315,6 +300,7 @@ pub async fn get_latest_workspace_database(
     workspace_id,
     workspace_database_oid,
     CollabType::WorkspaceDatabase,
+    default_client_id(),
   )
   .await?;
 
@@ -324,18 +310,13 @@ pub async fn get_latest_workspace_database(
 }
 
 pub async fn get_published_view(
-  collab_storage: &CollabAccessControlStorage,
+  collab_instance_cache: &impl WorkspaceCollabInstanceCache,
   publish_namespace: String,
   pg_pool: &PgPool,
+  uid: i64,
 ) -> Result<PublishedView, AppError> {
   let workspace_id = select_workspace_id_for_publish_namespace(pg_pool, &publish_namespace).await?;
-  let folder = get_latest_collab_folder(
-    collab_storage,
-    GetCollabOrigin::Server,
-    workspace_id,
-    default_client_id(),
-  )
-  .await?;
+  let folder = collab_instance_cache.get_folder(workspace_id).await?;
   let publish_view_ids_with_publish_info =
     select_published_view_ids_with_publish_info_for_workspace(pg_pool, workspace_id).await?;
   let publish_view_id_to_info_map: HashMap<String, PublishedViewInfo> =
@@ -359,13 +340,15 @@ pub async fn get_published_view(
     &workspace_id.to_string(),
     &folder,
     &publish_view_id_to_info_map,
+    uid,
   )?;
   Ok(published_view)
 }
 
 pub async fn list_database(
   pg_pool: &PgPool,
-  collab_storage: &CollabAccessControlStorage,
+  collab_instance_cache: &impl WorkspaceCollabInstanceCache,
+  collab_storage: &Arc<dyn CollabStore>,
   uid: i64,
   workspace_id: Uuid,
 ) -> Result<Vec<AFDatabase>, AppError> {
@@ -377,6 +360,7 @@ pub async fn list_database(
     workspace_id,
     ws_db_oid,
     CollabType::WorkspaceDatabase,
+    default_client_id(),
   )
   .await?;
 
@@ -388,16 +372,9 @@ pub async fn list_database(
   })?;
   let db_metas = ws_body.get_all_meta(&ws_body_collab.transact());
 
-  let folder = get_latest_collab_folder(
-    collab_storage,
-    GetCollabOrigin::User { uid },
-    workspace_id,
-    default_client_id(),
-  )
-  .await?;
-
+  let folder = collab_instance_cache.get_folder(workspace_id).await?;
   let trash = folder
-    .get_all_trash_sections()
+    .get_all_trash_sections(uid)
     .into_iter()
     .map(|s| s.id)
     .collect::<HashSet<_>>();
@@ -408,7 +385,7 @@ pub async fn list_database(
     let mut views: Vec<FolderViewMinimal> = Vec::new();
     for linked_view_id in db_meta.linked_views {
       if !trash.contains(&linked_view_id) {
-        if let Some(folder_view) = folder.get_view(&linked_view_id) {
+        if let Some(folder_view) = folder.get_view(&linked_view_id, uid) {
           views.push(to_dto_folder_view_miminal(&folder_view));
         };
       }
@@ -422,7 +399,7 @@ pub async fn list_database(
 }
 
 pub async fn list_database_row_ids(
-  collab_storage: &CollabAccessControlStorage,
+  collab_storage: &Arc<dyn CollabStore>,
   workspace_uuid: Uuid,
   database_uuid: Uuid,
 ) -> Result<Vec<AFDatabaseRow>, AppError> {
@@ -495,7 +472,7 @@ pub async fn insert_database_row(
         workspace_uuid,
         uid,
         new_doc_id,
-        &state.collab_access_control_storage,
+        &state.ws_server,
         row_doc_content,
       )
       .await?;
@@ -504,12 +481,8 @@ pub async fn insert_database_row(
     _ => None,
   };
 
-  let (mut db_collab, db_body) = get_latest_collab_database_body(
-    &state.collab_access_control_storage,
-    workspace_uuid,
-    database_uuid,
-  )
-  .await?;
+  let (mut db_collab, db_body) =
+    get_latest_collab_database_body(&state.collab_storage, workspace_uuid, database_uuid).await?;
   write_to_database_row(
     &db_body,
     &mut new_db_row_collab.transact_mut(),
@@ -567,7 +540,7 @@ pub async fn insert_database_row(
     )
     .await?;
 
-  let collab_storage = state.collab_access_control_storage.clone();
+  let collab_storage = state.collab_storage.clone();
   let mut db_txn = state.pg_pool.begin().await?;
   // handle row document (if provided)
   if let Some((doc_id, created_doc)) = new_row_doc_creation {
@@ -629,7 +602,7 @@ pub async fn upsert_database_row(
   cell_value_by_id: HashMap<String, serde_json::Value>,
   row_doc_content: Option<String>,
 ) -> Result<(), AppError> {
-  let collab_storage = &state.collab_access_control_storage;
+  let collab_storage = &state.collab_storage;
   let (mut db_row_collab, db_row_body) =
     match get_latest_collab_database_row_body(collab_storage, workspace_uuid, row_id).await {
       Ok(res) => res,
@@ -669,6 +642,7 @@ pub async fn upsert_database_row(
   // determine if there are any document changes
   let doc_changes: Option<(Uuid, DocChanges)> = get_database_row_doc_changes(
     collab_storage,
+    &state.ws_server,
     workspace_uuid,
     row_doc_content,
     &db_row_body,
@@ -781,7 +755,7 @@ pub async fn upsert_database_row(
 }
 
 pub async fn get_database_fields(
-  collab_storage: &CollabAccessControlStorage,
+  collab_storage: &Arc<dyn CollabStore>,
   workspace_uuid: Uuid,
   database_uuid: Uuid,
 ) -> Result<Vec<AFDatabaseField>, AppError> {
@@ -811,12 +785,8 @@ pub async fn add_database_field(
   database_id: Uuid,
   insert_field: AFInsertDatabaseField,
 ) -> Result<String, AppError> {
-  let (mut db_collab, db_body) = get_latest_collab_database_body(
-    &state.collab_access_control_storage,
-    workspace_id,
-    database_id,
-  )
-  .await?;
+  let (mut db_collab, db_body) =
+    get_latest_collab_database_body(&state.collab_storage, workspace_id, database_id).await?;
 
   let new_id = gen_field_id();
   let mut type_options = TypeOptions::new();
@@ -869,7 +839,7 @@ pub async fn add_database_field(
 }
 
 pub async fn list_database_row_ids_updated(
-  collab_storage: &CollabAccessControlStorage,
+  collab_storage: &Arc<dyn CollabStore>,
   pg_pool: &PgPool,
   workspace_uuid: Uuid,
   database_uuid: Uuid,
@@ -887,7 +857,7 @@ pub async fn list_database_row_ids_updated(
 }
 
 pub async fn list_database_row_details(
-  collab_storage: &CollabAccessControlStorage,
+  collab_storage: &Arc<dyn CollabStore>,
   uid: i64,
   workspace_uuid: Uuid,
   database_uuid: Uuid,

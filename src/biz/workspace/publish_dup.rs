@@ -1,6 +1,4 @@
 use app_error::AppError;
-use appflowy_collaborate::collab::storage::CollabAccessControlStorage;
-
 use collab_database::database::DatabaseBody;
 use collab_database::entity::FieldType;
 use collab_database::rows::meta_id_from_row_id;
@@ -13,9 +11,9 @@ use collab_database::workspace_database::WorkspaceDatabase;
 use collab_document::blocks::DocumentData;
 use collab_document::document::Document;
 use collab_entity::CollabType;
-use collab_folder::{CollabOrigin, Folder, RepeatedViewIdentifier, View};
+use collab_folder::{CollabOrigin, RepeatedViewIdentifier, View};
 use database::collab::GetCollabOrigin;
-use database::collab::{select_workspace_database_oid, CollabStorage};
+use database::collab::{select_workspace_database_oid, CollabStore};
 use database::file::s3_client_impl::AwsS3BucketClientImpl;
 use database::file::BucketClient;
 use database::file::ResponseBlob;
@@ -32,7 +30,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::biz::collab::folder_view::to_folder_view_icon;
 use crate::biz::collab::folder_view::to_folder_view_layout;
-use crate::biz::collab::utils::collab_from_doc_state;
+use crate::biz::collab::utils::{collab_from_doc_state, get_latest_collab};
 use tracing::error;
 use uuid::Uuid;
 use workspace_template::gen_view_id;
@@ -43,10 +41,10 @@ use yrs::Out;
 use yrs::{Map, MapRef};
 
 use crate::biz::collab::utils::collab_to_bin;
-use crate::biz::collab::utils::get_latest_collab_encoded;
 
 use crate::state::AppState;
-use appflowy_collaborate::ws2::CollabUpdatePublisher;
+use appflowy_collaborate::ws2::{CollabUpdatePublisher, WorkspaceCollabInstanceCache};
+use appflowy_collaborate::CollabMetrics;
 use collab::core::collab::default_client_id;
 use collab_database::database_trait::NoPersistenceDatabaseCollabService;
 
@@ -61,15 +59,16 @@ pub async fn duplicate_published_collab_to_workspace(
   let copier = PublishCollabDuplicator::new(
     state.pg_pool.clone(),
     state.bucket_client.clone(),
-    state.collab_access_control_storage.clone(),
+    state.collab_storage.clone(),
     Box::new(state.ws_server.clone()),
     dest_uid,
     dest_workspace_id,
     dest_view_id,
+    state.metrics.collab_metrics.clone(),
   );
 
   let time_now = chrono::Utc::now().timestamp_millis();
-  let root_view_id_for_duplicate = copier.duplicate(publish_view_id).await?;
+  let root_view_id_for_duplicate = copier.duplicate(publish_view_id, &state.ws_server).await?;
   let elapsed = chrono::Utc::now().timestamp_millis() - time_now;
   tracing::info!(
     "duplicate_published_collab_to_workspace: elapsed time: {}ms",
@@ -81,7 +80,7 @@ pub async fn duplicate_published_collab_to_workspace(
 pub struct PublishCollabDuplicator {
   /// for fetching and writing folder data
   /// of dest workspace
-  collab_storage: Arc<CollabAccessControlStorage>,
+  collab_storage: Arc<dyn CollabStore>,
   /// A map to store the old view_id that was duplicated and new view_id assigned.
   /// If value is none, it means the view_id is not published.
   duplicated_refs: HashMap<Uuid, Option<Uuid>>,
@@ -112,6 +111,7 @@ pub struct PublishCollabDuplicator {
   /// view of workspace to duplicate into
   dest_view_id: Uuid,
   collab_update_publisher: Box<dyn CollabUpdatePublisher>,
+  collab_metrics: Arc<CollabMetrics>,
 }
 
 fn deserialize_publish_database_data(
@@ -129,14 +129,17 @@ fn deserialize_publish_database_data(
 }
 
 impl PublishCollabDuplicator {
+  #[allow(clippy::too_many_arguments)]
   pub fn new(
     pg_pool: PgPool,
     bucket_client: AwsS3BucketClientImpl,
-    collab_storage: Arc<CollabAccessControlStorage>,
+    collab_storage: Arc<dyn CollabStore>,
+
     collab_update_publisher: Box<dyn CollabUpdatePublisher>,
     dest_uid: i64,
     dest_workspace_id: Uuid,
     dest_view_id: Uuid,
+    collab_metrics: Arc<CollabMetrics>,
   ) -> Self {
     let ts_now = chrono::Utc::now().timestamp();
     Self {
@@ -155,14 +158,18 @@ impl PublishCollabDuplicator {
       dest_workspace_id,
       dest_view_id,
       collab_update_publisher,
+      collab_metrics,
     }
   }
 
-  async fn duplicate(mut self, publish_view_id: Uuid) -> Result<Uuid, AppError> {
+  async fn duplicate(
+    mut self,
+    publish_view_id: Uuid,
+    collab_instance_cache: &impl WorkspaceCollabInstanceCache,
+  ) -> Result<Uuid, AppError> {
     // new view after deep copy
     // this is the root of the document/database duplicated
     let root_view_id = gen_view_id();
-    let client_id = default_client_id();
     let mut root_view = match self.deep_copy(root_view_id, publish_view_id).await? {
       Some(v) => v,
       None => {
@@ -190,6 +197,7 @@ impl PublishCollabDuplicator {
       dest_workspace_id,
       dest_view_id,
       collab_update_publisher: collab_update_writer,
+      collab_metrics,
     } = self;
 
     // insert all collab object accumulated
@@ -216,7 +224,7 @@ impl PublishCollabDuplicator {
     }
     match tokio::time::timeout(Duration::from_secs(60), txn.commit()).await {
       Ok(result) => {
-        collab_storage.metrics().observe_pg_tx(start.elapsed());
+        collab_metrics.observe_pg_tx(start.elapsed());
         result.map_err(AppError::from)
       },
       Err(_) => {
@@ -231,7 +239,7 @@ impl PublishCollabDuplicator {
     if !workspace_databases.is_empty() {
       let ws_db_oid = select_workspace_database_oid(&pg_pool, &dest_workspace_id).await?;
       let ws_db_collab = {
-        let ws_database_ec = get_latest_collab_encoded(
+        get_latest_collab(
           &collab_storage,
           GetCollabOrigin::User {
             uid: duplicator_uid,
@@ -239,9 +247,9 @@ impl PublishCollabDuplicator {
           dest_workspace_id,
           ws_db_oid,
           CollabType::WorkspaceDatabase,
+          default_client_id(),
         )
-        .await?;
-        collab_from_doc_state(ws_database_ec.doc_state.to_vec(), &ws_db_oid, client_id)?
+        .await?
       };
 
       let mut ws_db = WorkspaceDatabase::open(ws_db_collab).map_err(|err| {
@@ -275,35 +283,16 @@ impl PublishCollabDuplicator {
         .await?;
     }
 
-    let collab_folder_encoded = get_latest_collab_encoded(
-      &collab_storage,
-      GetCollabOrigin::User {
-        uid: duplicator_uid,
-      },
-      dest_workspace_id,
-      dest_workspace_id,
-      CollabType::Folder,
-    )
-    .await?;
-
-    let mut folder = tokio::task::spawn_blocking(move || {
-      Folder::from_collab_doc_state(
-        duplicator_uid,
-        CollabOrigin::Server,
-        collab_folder_encoded.into(),
-        &dest_workspace_id.to_string(),
-        client_id,
-      )
-      .map_err(|e| AppError::Unhandled(e.to_string()))
-    })
-    .await??;
-
+    let mut folder = collab_instance_cache.get_folder(dest_workspace_id).await?;
     let folder_updates = tokio::task::spawn_blocking(move || {
       let mut folder_txn = folder.collab.transact_mut();
       let mut duplicated_view_ids = HashSet::new();
       duplicated_view_ids.insert(dest_view_id);
       duplicated_view_ids.insert(root_view.id.parse().unwrap());
-      folder.body.views.insert(&mut folder_txn, root_view, None);
+      folder
+        .body
+        .views
+        .insert(&mut folder_txn, root_view, None, duplicator_uid);
       // when child views are added, it must have a parent view that is previously added
       // TODO: if there are too many child views, consider using topological sort
       loop {
@@ -320,7 +309,7 @@ impl PublishCollabDuplicator {
             folder
               .body
               .views
-              .insert(&mut folder_txn, view.clone(), None);
+              .insert(&mut folder_txn, view.clone(), None, duplicator_uid);
             duplicated_view_ids.insert(*view_id);
             inserted.push(*view_id);
           }
