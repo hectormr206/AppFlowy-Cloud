@@ -7,7 +7,7 @@ services:
     expose:
       - "80"
     volumes:
-      - ./nginx/nginx_coolify.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx/nginx_coolify.conf:/etc/nginx/conf.d/appflowy.conf
 
   # You do not need this if you have configured to use your own s3 file storage
   minio:
