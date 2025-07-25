@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use database_entity::dto::{
   AFRole, AFWorkspaceInvitation, AFWorkspaceInvitationStatus, AFWorkspaceSettings, GlobalComment,
-  InvitationCodeInfo, MentionableWorkspaceMemberOrGuest, Reaction, WorkspaceMemberProfile,
+  InvitationCodeInfo, MentionableWorkspaceMemberOrGuest,
+  MentionableWorkspaceMemberOrGuestWithLastMentionedTime, PageMentionUpdate, Reaction,
+  WorkspaceMemberProfile,
 };
 use futures_util::stream::BoxStream;
 use sqlx::{types::uuid, Executor, PgPool, Postgres, Transaction};
@@ -1908,11 +1910,56 @@ pub async fn select_workspace_mentionable_members_or_guests<
         awm.role_id AS "role!",
         COALESCE(awmp.avatar_url, au.metadata ->> 'icon_url') AS "avatar_url",
         awmp.cover_image_url,
+        awmp.custom_image_url,
         awmp.description
       FROM af_workspace_member awm
       JOIN af_user au ON awm.uid = au.uid
       LEFT JOIN af_workspace_member_profile awmp ON (awm.uid = awmp.uid AND awm.workspace_id = awmp.workspace_id)
       WHERE awm.workspace_id = $1
+    "#,
+    workspace_id,
+  )
+  .fetch_all(executor)
+  .await?;
+
+  Ok(members)
+}
+
+pub async fn select_workspace_mentionable_members_or_guests_with_last_mentioned_time<
+  'a,
+  E: Executor<'a, Database = Postgres>,
+>(
+  executor: E,
+  workspace_id: &Uuid,
+) -> Result<Vec<MentionableWorkspaceMemberOrGuestWithLastMentionedTime>, AppError> {
+  let members = sqlx::query_as!(
+    MentionableWorkspaceMemberOrGuestWithLastMentionedTime,
+    r#"
+      WITH last_mentioned AS (
+        SELECT
+          person_id,
+          MAX(mentioned_at) AS last_mentioned_at
+        FROM af_page_mention
+        WHERE workspace_id = $1
+        GROUP BY person_id
+      )
+
+      SELECT
+        au.uuid,
+        COALESCE(awmp.name, au.name) AS "name!",
+        au.email,
+        awm.role_id AS "role!",
+        COALESCE(awmp.avatar_url, au.metadata ->> 'icon_url') AS "avatar_url",
+        awmp.cover_image_url,
+        awmp.custom_image_url,
+        awmp.description,
+        lm.last_mentioned_at
+      FROM af_workspace_member awm
+      JOIN af_user au ON awm.uid = au.uid
+      LEFT JOIN af_workspace_member_profile awmp ON (awm.uid = awmp.uid AND awm.workspace_id = awmp.workspace_id)
+      LEFT JOIN last_mentioned lm ON au.uuid = lm.person_id
+      WHERE awm.workspace_id = $1
+      ORDER BY lm.last_mentioned_at DESC NULLS LAST
     "#,
     workspace_id,
   )
@@ -1940,6 +1987,7 @@ pub async fn select_workspace_mentionable_member_or_guest_by_uuid<
         awm.role_id AS "role!",
         COALESCE(awmp.avatar_url, au.metadata ->> 'icon_url') AS "avatar_url",
         awmp.cover_image_url,
+        awmp.custom_image_url,
         awmp.description
       FROM af_workspace_member awm
       JOIN af_user au ON awm.uid = au.uid
@@ -1964,12 +2012,13 @@ pub async fn upsert_workspace_member_profile<'a, E: Executor<'a, Database = Post
 ) -> Result<(), AppError> {
   sqlx::query!(
     r#"
-      INSERT INTO af_workspace_member_profile (workspace_id, uid, name, avatar_url, cover_image_url, description)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO af_workspace_member_profile (workspace_id, uid, name, avatar_url, cover_image_url, custom_image_url, description)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       ON CONFLICT (workspace_id, uid) DO UPDATE
       SET name = EXCLUDED.name,
           avatar_url = EXCLUDED.avatar_url,
           cover_image_url = EXCLUDED.cover_image_url,
+          custom_image_url = EXCLUDED.custom_image_url,
           description = EXCLUDED.description
     "#,
     workspace_id,
@@ -1977,10 +2026,64 @@ pub async fn upsert_workspace_member_profile<'a, E: Executor<'a, Database = Post
     updated_profile.name,
     updated_profile.avatar_url,
     updated_profile.cover_image_url,
+    updated_profile.custom_image_url,
     updated_profile.description
   )
   .execute(executor)
   .await?;
 
+  Ok(())
+}
+
+pub async fn select_page_mentions_by_user<'a, E: Executor<'a, Database = Postgres>>(
+  executor: E,
+  workspace_id: &Uuid,
+  uid: i64,
+) -> Result<Vec<Uuid>, AppError> {
+  let mentions = sqlx::query_scalar!(
+    r#"
+      SELECT
+        person_id
+      FROM af_page_mention
+      WHERE workspace_id = $1
+        AND mentioned_by = $2
+    "#,
+    workspace_id,
+    uid,
+  )
+  .fetch_all(executor)
+  .await?;
+
+  Ok(mentions)
+}
+
+pub async fn upsert_page_mention<'a, E: Executor<'a, Database = Postgres>>(
+  executor: E,
+  workspace_id: &Uuid,
+  view_id: &Uuid,
+  uid: i64,
+  update: &PageMentionUpdate,
+) -> Result<(), AppError> {
+  sqlx::query!(
+    r#"
+      INSERT INTO af_page_mention (workspace_id, view_id, view_name, person_id, block_id, mentioned_by, mentioned_at, require_notification)
+      VALUES ($1, $2, $3, $4, $5, $6, current_timestamp, $7)
+      ON CONFLICT (workspace_id, view_id, person_id) DO UPDATE
+      SET mentioned_by = EXCLUDED.mentioned_by,
+          mentioned_at = EXCLUDED.mentioned_at,
+          block_id = EXCLUDED.block_id,
+          require_notification = EXCLUDED.require_notification,
+          notified = false
+    "#,
+    workspace_id,
+    view_id,
+    update.view_name,
+    update.person_id,
+    update.block_id,
+    uid,
+    update.require_notification,
+  )
+  .execute(executor)
+  .await?;
   Ok(())
 }
