@@ -38,7 +38,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
       - PGPORT=${POSTGRES_PORT:-5432}
-    command: ["postgres", "-c", "port=${POSTGRES_PORT:-5432}"]
+    command: [ "postgres", "-c", "port=${POSTGRES_PORT:-5432}" ]
     healthcheck:
       test: [ "CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}", "-p", "${POSTGRES_PORT:-5432}" ]
       interval: 5s
@@ -145,6 +145,9 @@ services:
       - AI_OPENAI_API_KEY=${AI_OPENAI_API_KEY}
       - APPFLOWY_WEB_URL=${APPFLOWY_WEB_URL}
       - APPFLOWY_BASE_URL=${APPFLOWY_BASE_URL}
+      - ASSEMBLYAI_API_KEY=${ASSEMBLYAI_API_KEY}
+      - ASSEMBLYAI_API_BASE=${ASSEMBLYAI_API_BASE}
+      - ASSEMBLYAI_STREAMING_API_BASE=${ASSEMBLYAI_STREAMING_API_BASE}
     image: appflowyinc/appflowy_cloud:${APPFLOWY_CLOUD_VERSION:-latest}
     healthcheck:
       test: "curl --fail http://127.0.0.1:8000/api/health || exit 1"
