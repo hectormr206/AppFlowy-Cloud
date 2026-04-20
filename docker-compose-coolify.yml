@@ -71,6 +71,10 @@ services:
               proxy_read_timeout 86400s;
           }
 
+          # Flutter client >= 0.9.x probes /api/health; backend exposes /health.
+          # Return 200 directly so the "Save self-host URL" health check passes.
+          location = /api/health { return 200 "healthy\n"; }
+
           location /api {
               proxy_pass \$$appflowy_cloud_backend;
               proxy_set_header X-Request-Id \$$request_id;
