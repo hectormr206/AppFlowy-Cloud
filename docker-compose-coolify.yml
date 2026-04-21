@@ -72,8 +72,8 @@ services:
           }
 
           # Flutter client >= 0.9.x probes /api/health; backend exposes /health.
-          # Return 200 directly so the "Save self-host URL" health check passes.
-          location = /api/health { return 200 "healthy\n"; }
+          # Return 200 directly so the 'Save self-host URL' health check passes.
+          location = /api/health { return 200 \\\"healthy\\n\\\"; }
 
           location /api {
               proxy_pass \$$appflowy_cloud_backend;
