@@ -294,7 +294,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-    image: appflowyinc/gotrue:${GOTRUE_VERSION:-latest}
+    image: appflowyinc/gotrue:${GOTRUE_VERSION:-0.16.5}
     environment:
       # There are a lot of options to configure GoTrue. You can reference the example config:
       # https://github.com/supabase/auth/blob/master/example.env
@@ -377,14 +377,14 @@ services:
       - AI_SERVER_PORT=${AI_SERVER_PORT}
       - AI_OPENAI_API_KEY=${AI_OPENAI_API_KEY}
       - APPFLOWY_WEB_URL=${APPFLOWY_WEB_URL}
-    image: appflowyinc/appflowy_cloud:${APPFLOWY_CLOUD_VERSION:-latest}
+    image: appflowyinc/appflowy_cloud:${APPFLOWY_CLOUD_VERSION:-0.16.5}
     depends_on:
       gotrue:
         condition: service_healthy
 
   admin_frontend:
     restart: on-failure
-    image: appflowyinc/admin_frontend:${APPFLOWY_ADMIN_FRONTEND_VERSION:-latest}
+    image: appflowyinc/admin_frontend:${APPFLOWY_ADMIN_FRONTEND_VERSION:-0.16.5}
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - ADMIN_FRONTEND_REDIS_URL=${ADMIN_FRONTEND_REDIS_URL:-redis://redis:6379}
@@ -399,7 +399,7 @@ services:
 
   ai:
     restart: on-failure
-    image: appflowyinc/appflowy_ai:${APPFLOWY_AI_VERSION:-latest}
+    image: appflowyinc/appflowy_ai:${APPFLOWY_AI_VERSION:-0.15.18}
     environment:
       - AI_SERVER_PORT=${AI_SERVER_PORT}
       - OPENAI_API_KEY=${AI_OPENAI_API_KEY}
@@ -427,7 +427,7 @@ services:
 
   appflowy_worker:
     restart: on-failure
-    image: appflowyinc/appflowy_worker:${APPFLOWY_WORKER_VERSION:-latest}
+    image: appflowyinc/appflowy_worker:${APPFLOWY_WORKER_VERSION:-0.16.5}
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - APPFLOWY_ENVIRONMENT=production
@@ -454,7 +454,7 @@ services:
 
   appflowy_web:
     restart: on-failure
-    image: appflowyinc/appflowy_web:${APPFLOWY_WEB_VERSION:-latest}
+    image: appflowyinc/appflowy_web:${APPFLOWY_WEB_VERSION:-0.15.5}
     depends_on:
       - appflowy_cloud
 volumes:
