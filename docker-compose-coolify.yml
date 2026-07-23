@@ -255,7 +255,7 @@ services:
       - minio_data:/data
 
   postgres:
-    restart: on-failure
+    restart: unless-stopped
     image: pgvector/pgvector:pg16
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
@@ -281,7 +281,7 @@ services:
       - ./docker/pgadmin/servers.json:/pgadmin4/servers.json
 
   redis:
-    restart: on-failure
+    restart: unless-stopped
     image: redis
 
   gotrue:
