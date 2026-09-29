@@ -24,3 +24,4 @@ flake.lock
 
 docker-compose.override.yml
 .serena
+.atl/
