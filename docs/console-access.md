@@ -16,9 +16,22 @@ Both commands must end with `ALL PASS`. They check console denial, including
 encoded separators, unchanged root/API/auth statuses and an unrelated sibling
 host. Bodies and cookies are discarded; no credentials or stored-data writes are
 used. See `--help` for `HOST`, `SIBLING_HOST`, `ORIGIN_IP`, `CONNECT_TO`, `MAX_TIME`
-and exit codes. Origin mode pins the hostname to `127.0.0.1` by default and skips
-certificate validation only for that direct local routing check. Public mode
-uses ordinary DNS and certificate validation.
+and exit codes. Origin mode ignores configured HTTP(S) proxies (`--noproxy '*'`),
+pins the hostname to `127.0.0.1` by default and skips certificate validation only
+for that direct local routing check. Public mode uses ordinary DNS, certificate
+validation and any configured proxy.
+
+### Proxy regression
+
+A proxy would otherwise bypass `--resolve` and let a healthy public route mask a
+stale origin. This run uses an unusable dummy proxy and must still end with
+`ALL PASS`:
+
+```bash
+P=http://127.0.0.1:9
+env HTTP_PROXY=$P http_proxy=$P HTTPS_PROXY=$P https_proxy=$P ALL_PROXY=$P \
+  all_proxy=$P NO_PROXY= no_proxy= bash tests/console-access.sh origin
+```
 
 ## Deploy without replacing the stack
 

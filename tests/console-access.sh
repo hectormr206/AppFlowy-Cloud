@@ -11,8 +11,10 @@ usage() {
 Usage: console-access.sh [public|origin] | --help
 
   public   (default) Test through public DNS/TLS with normal certificate validation.
-  origin   Test the local Traefik directly: --resolve HOST:{80,443}:\$ORIGIN_IP and
-           --insecure. Certificate validation is skipped ONLY for this local routing check.
+  origin   Test the local Traefik directly: --noproxy '*' (configured proxies are
+           ignored so --resolve really pins the origin), --resolve
+           HOST:{80,443}:\$ORIGIN_IP and --insecure. Certificate validation is
+           skipped ONLY for this local routing check.
 
 Environment:
   HOST          Guarded host (default appflowy.hectormr.com)
@@ -45,7 +47,7 @@ check() {
   local args=(-sS -o /dev/null -w '%{http_code}' --path-as-is --retry 0
     --connect-timeout "$CONNECT_TO" --max-time "$MAX_TIME")
   if [ "$MODE" = origin ]; then
-    args+=(--insecure --resolve "$host:80:$ORIGIN_IP" --resolve "$host:443:$ORIGIN_IP")
+    args+=(--noproxy '*' --insecure --resolve "$host:80:$ORIGIN_IP" --resolve "$host:443:$ORIGIN_IP")
   fi
   local got rc
   if got="$(curl "${args[@]}" "$@" "$scheme://$host$path")"; then
