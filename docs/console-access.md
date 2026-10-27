@@ -21,6 +21,11 @@ pins the hostname to `127.0.0.1` by default and skips certificate validation onl
 for that direct local routing check. Public mode uses ordinary DNS, certificate
 validation and any configured proxy.
 
+Expected codes pin this deployment: `/` redirects (302), while GoTrue/API health
+and the sibling host return 200. This is not a generic 2xx/3xx liveness probe.
+`CONNECT_TO` limits each connection phase; `MAX_TIME` limits one curl check,
+including its redirects. Neither is a deadline for the complete script.
+
 ### Proxy regression
 
 A proxy would otherwise bypass `--resolve` and let a healthy public route mask a

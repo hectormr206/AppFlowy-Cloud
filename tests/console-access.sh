@@ -36,6 +36,7 @@ case "$MODE" in
 esac
 
 ORIGIN_IP="${ORIGIN_IP:-127.0.0.1}"
+# Curl budgets apply to each check, not to the complete script.
 CONNECT_TO="${CONNECT_TO:-5}"
 MAX_TIME="${MAX_TIME:-10}"
 fail=0
@@ -85,7 +86,7 @@ check 403 "console forwarded spoof"  https "$HOST" /console/login \
 check 403 "console http final denial" http "$HOST" /console/login \
   --location --max-redirs 3
 
-# Normal AppFlowy routes must be untouched.
+# Pin this deployment's baseline: root redirects (302), auth/API health is 200.
 check 302 "root"            https "$HOST" /
 check 200 "gotrue health"   https "$HOST" /gotrue/health
 check 200 "api health"      https "$HOST" /api/health

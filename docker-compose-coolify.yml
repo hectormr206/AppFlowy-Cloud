@@ -224,7 +224,8 @@ services:
               proxy_set_header Connection \"Upgrade\";
           }
 
-          # Public administration is disabled; normal clients use other routes.
+          # Unused management UI only; client sign-in and sync use other routes.
+          # nginx normalizes the URI before matching this prefix.
           location /console {
               return 403;
           }
