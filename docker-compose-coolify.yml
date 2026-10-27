@@ -224,13 +224,9 @@ services:
               proxy_set_header Connection \"Upgrade\";
           }
 
-          # Admin Frontend
-          # Optional Module, comment this section if you did not deploy admin_frontend in docker-compose.yml
+          # Public administration is disabled; normal clients use other routes.
           location /console {
-              proxy_pass \$$admin_frontend_backend;
-
-              proxy_set_header X-Scheme \$$scheme;
-              proxy_set_header Host \$$host;
+              return 403;
           }
 
           # AppFlowy Web
