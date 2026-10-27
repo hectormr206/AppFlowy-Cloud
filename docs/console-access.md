@@ -2,8 +2,26 @@
 
 The Coolify nginx configuration returns **403** for `/console` and its normalized
 path variants. Regular AppFlowy web, API, authentication and sync routes are not
-changed. The admin container remains internal; this is containment, not a Node or
-Next.js dependency update or proof that every component is vulnerability-free.
+changed. The source no longer deploys the optional `admin_frontend` service
+behind `/console`; its old Node/Next runtime was not updated or replaced. This
+retires one unused component, not every vulnerability. Changing the source does
+not by itself change a running deployment.
+
+## Check the source
+
+```bash
+python3 -I tests/admin-retirement.py
+```
+
+It reads only `docker compose config` output for `docker-compose-coolify.yml`,
+using an empty `HOME`/`DOCKER_CONFIG`, `--env-file /dev/null` and
+`--no-interpolate`, so no
+private `.env`, credentials or host environment are read, and no daemon, image or
+network operation occurs. It must end with `ALL PASS` and checks that
+`admin_frontend` and its nginx backend variable are gone, the other services and
+data volumes are still defined, the `/console` 403 guard and normal gotrue/API
+routes remain, and MinIO still uses `pull_policy: never`. Exit 2 means Docker
+Compose was unavailable, not a pass.
 
 ## Check access
 
@@ -40,20 +58,39 @@ env HTTP_PROXY=$P http_proxy=$P HTTPS_PROXY=$P https_proxy=$P ALL_PROXY=$P \
 
 ## Deploy without replacing the stack
 
-Keep the source and Coolify's generated nginx command consistent. Validate nginx
-configuration before selectively recreating **only nginx**, with no dependencies
-and no image pull. A reload alone is insufficient if a later container restart
-would regenerate the previous configuration from its old command.
+The console guard is already deployed. Retiring admin requires no nginx reload
+or recreation. If changing the guard separately, keep the source and generated
+nginx command consistent: a reload alone cannot update the bootstrap command
+that a later container restart runs.
 
-Check automatic-deployment behavior before publishing the commit. The deployed
-Coolify recognizes `[skip ci]` in this maintenance commit and skips its automatic
-deployment; leave the auto-deploy setting unchanged. Do not trigger a full-stack
-deployment: cached MinIO images use `pull_policy: never` and must be preserved.
-Do not expose or copy environment/credential files for this change.
+Publish the source **before** stopping admin. Verify automatic-deployment skip
+behavior first: every new commit in the push must include `[skip ci]` or
+`[skip cd]`; leave the auto-deploy setting unchanged. Do not use Coolify's
+**Restart** or **Redeploy** for this retirement: they can run a full-stack deploy
+for this Git compose application and recreate other services. The generated
+compose file is deployment output, not the durable source. Cached MinIO images
+use `pull_policy: never` and must be preserved. Do not expose or copy
+credential/environment files.
+
+### Retire the running admin container
+
+Deleting the service from the source does not stop an existing container. Retire
+only that container, as a separate explicit step: do not run a full-stack
+deployment, pull images, recreate other services or touch volumes and data. Keep
+the stopped container and its image until the checks below pass, so rollback stays
+possible. Cached MinIO and other images are left untouched. After retirement, run
+both access probes above (`/console` must still be 403, root/API/auth statuses
+unchanged) and have a human confirm desktop login and sync, which these
+credential-free probes do not cover.
 
 ## Rollback
 
-Revert only the console-block change and restore the previous nginx command from
-the protected routing-config backup, then selectively recreate nginx. This makes
-the public console reachable again; do it only as an explicit rollback decision.
+For an immediate admin-retirement rollback, start only the retained admin
+container; leave `/console` blocked and do not recreate other services. Restore
+the `admin_frontend` definition from version control only for an intentional
+future deployment. A later full-stack deployment may remove the stopped rollback
+container, so do not rely on its indefinite retention.
+
+Reverting the console guard is a separate explicit decision: it would make the
+public console reachable again and is not required to restore internal admin.
 Authenticated desktop login/sync is not covered by these credential-free probes.
